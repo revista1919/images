@@ -1,4 +1,4 @@
-name: Optimize and Deploy Images
+name: Optimize Images
 
 on:
   push:
@@ -8,24 +8,22 @@ on:
       - '**.jpeg'
       - '**.png'
       - '**.gif'
-      - '**.webp'
       - '**.svg'
   workflow_dispatch: # Permite ejecución manual
 
-# Permisos para GitHub Pages
+# Permisos necesarios
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 jobs:
-  optimize-and-deploy:
+  optimize-images:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -35,39 +33,80 @@ jobs:
       - name: Install sharp for image optimization
         run: npm install -g sharp-cli
 
-      - name: Optimize images
+      - name: Optimize and replace images
         run: |
-          # Crear directorio temporal
-          mkdir -p temp_images
-          
-          # Optimizar JPG/JPEG a WebP
+          # Optimizar JPG/JPEG a WebP y eliminar originales
           find . -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) -print0 | while IFS= read -r -d '' file; do
+            dir=$(dirname "$file")
             filename=$(basename "$file")
             name="${filename%.*}"
             echo "🖼️ Optimizando JPG: $filename"
-            sharp -i "$file" -o "temp_images/$name.webp" --quality 80 --effort 6
+            
+            # Convertir a WebP en el mismo directorio
+            sharp -i "$file" -o "$dir/$name.webp" --quality 80 --effort 6
+            
+            # Eliminar archivo original
+            rm "$file"
+            echo "✅ Reemplazado: $filename → $name.webp"
           done
           
-          # Optimizar PNG a WebP
+          # Optimizar PNG a WebP y eliminar originales
           find . -type f -iname "*.png" -print0 | while IFS= read -r -d '' file; do
+            dir=$(dirname "$file")
             filename=$(basename "$file")
             name="${filename%.*}"
             echo "🖼️ Optimizando PNG: $filename"
-            sharp -i "$file" -o "temp_images/$name.webp" --quality 85 --effort 6
+            
+            # Convertir a WebP en el mismo directorio
+            sharp -i "$file" -o "$dir/$name.webp" --quality 85 --effort 6
+            
+            # Eliminar archivo original
+            rm "$file"
+            echo "✅ Reemplazado: $filename → $name.webp"
+          done
+
+      - name: Generate gallery files
+        run: |
+          # Crear directorio temporal para los archivos de la galería
+          mkdir -p gallery-dist
+          
+          # Crear el list.json con todas las imágenes WebP
+          cat > gallery-dist/list.json << 'EOF'
+          [
+          EOF
+          
+          # Generar lista de imágenes WebP con metadatos
+          first=true
+          find . -type f -name "*.webp" -o -name "*.gif" -o -name "*.svg" | while read -r img; do
+            if [ -f "$img" ]; then
+              if [ "$first" = true ]; then
+                first=false
+              else
+                echo "," >> gallery-dist/list.json
+              fi
+              
+              filename=$(basename "$img")
+              ext="${filename##*.}"
+              size=$(du -h "$img" | cut -f1)
+              modified=$(date -r "$img" +"%Y-%m-%dT%H:%M:%S%z")
+              path="${img#./}"
+              
+              cat >> gallery-dist/list.json << EOF
+            {
+              "name": "$filename",
+              "path": "$path",
+              "extension": "$ext",
+              "size": "$size",
+              "modified": "$modified"
+            }
+          EOF
+            fi
           done
           
-          # Copiar GIFs sin optimizar (mantener animación)
-          find . -type f -iname "*.gif" -exec cp {} temp_images/ \;
+          echo "]" >> gallery-dist/list.json
           
-          # Copiar WebP existentes
-          find . -type f -iname "*.webp" -exec cp {} temp_images/ \;
-          
-          # Copiar SVGs
-          find . -type f -iname "*.svg" -exec cp {} temp_images/ \;
-
-      - name: Generate image index
-        run: |
-          cat > temp_images/index.html << 'EOF'
+          # Copiar el index.html
+          cat > gallery-dist/index.html << 'EOF'
           <!DOCTYPE html>
           <html lang="es">
           <head>
@@ -75,6 +114,7 @@ jobs:
               <meta name="viewport" content="width=device-width, initial-scale=1.0">
               <title>Repositorio de Imágenes - Revista Nacional de Ciencias para Estudiantes</title>
               <style>
+                  /* Mismo CSS que tenías antes */
                   * {
                       margin: 0;
                       padding: 0;
@@ -405,7 +445,7 @@ jobs:
                   <div class="gallery" id="gallery"></div>
                   
                   <footer>
-                      <p>Las imágenes están disponibles en: <strong>https://revista1919.github.io/images/[nombre].webp</strong></p>
+                      <p>Las imágenes están disponibles en formato WebP optimizado</p>
                       <p style="margin-top: 0.5rem; font-size: 0.9rem;">Actualizado: <span id="updateDate"></span></p>
                   </footer>
               </div>
@@ -421,7 +461,6 @@ jobs:
                   let images = [];
                   let currentView = 'grid';
                   
-                  // Cargar lista de imágenes
                   async function loadImages() {
                       try {
                           const response = await fetch('./list.json?t=' + Date.now());
@@ -448,7 +487,6 @@ jobs:
                       }
                   }
                   
-                  // Renderizar galería
                   function renderGallery() {
                       const searchTerm = document.getElementById('searchInput').value.toLowerCase();
                       const filtered = images.filter(img => 
@@ -474,8 +512,8 @@ jobs:
                       
                       gallery.innerHTML = filtered.map(img => \`
                           <div class="image-card" data-name="\${img.name}">
-                              <img class="image-preview" src="./\${img.name}" alt="\${img.name}" 
-                                   onclick="openModal('./\${img.name}')"
+                              <img class="image-preview" src="./\${img.path}" alt="\${img.name}" 
+                                   onclick="openModal('./\${img.path}')"
                                    onerror="this.src='https://via.placeholder.com/300?text=Error'">
                               <span class="badge">\${img.extension}</span>
                               <div class="image-info">
@@ -485,9 +523,9 @@ jobs:
                                       <span>📅 \${new Date(img.modified).toLocaleDateString()}</span>
                                   </div>
                                   <div class="image-url" id="url-\${img.name}">
-                                      https://revista1919.github.io/images/\${img.name}
+                                      \${window.location.origin}\${window.location.pathname}\${img.path}
                                   </div>
-                                  <button class="copy-btn" onclick="copyToClipboard('\${img.name}', this)">
+                                  <button class="copy-btn" onclick="copyToClipboard('\${img.path}', this)">
                                       <span>📋 Copiar URL</span>
                                   </button>
                               </div>
@@ -495,9 +533,8 @@ jobs:
                       \`).join('');
                   }
                   
-                  // Copiar al portapapeles
-                  async function copyToClipboard(filename, btn) {
-                      const url = \`https://revista1919.github.io/images/\${filename}\`;
+                  async function copyToClipboard(path, btn) {
+                      const url = \`\${window.location.origin}\${window.location.pathname}\${path}\`;
                       try {
                           await navigator.clipboard.writeText(url);
                           btn.classList.add('copied');
@@ -511,7 +548,6 @@ jobs:
                       }
                   }
                   
-                  // Cambiar vista
                   function setView(view) {
                       currentView = view;
                       document.querySelectorAll('.view-btn').forEach(btn => btn.classList.remove('active'));
@@ -519,7 +555,6 @@ jobs:
                       renderGallery();
                   }
                   
-                  // Modal de imagen
                   function openModal(src) {
                       document.getElementById('modalImage').src = src;
                       document.getElementById('imageModal').classList.add('active');
@@ -529,77 +564,39 @@ jobs:
                       document.getElementById('imageModal').classList.remove('active');
                   }
                   
-                  // Event listeners
                   document.getElementById('searchInput').addEventListener('input', renderGallery);
                   document.addEventListener('keydown', (e) => {
                       if (e.key === 'Escape') closeModal();
                   });
                   
-                  // Inicializar
                   loadImages();
               </script>
           </body>
           </html>
           EOF
 
-      - name: Generate image list JSON
-        run: |
-          cat > temp_images/list.json << 'EOF'
-          [
-          EOF
-          
-          # Generar lista de imágenes con metadatos
-          first=true
-          for img in temp_images/*.{webp,gif,svg}; do
-            if [ -f "$img" ]; then
-              if [ "$first" = true ]; then
-                first=false
-              else
-                echo "," >> temp_images/list.json
-              fi
-              filename=$(basename "$img")
-              ext="${filename##*.}"
-              size=$(du -h "$img" | cut -f1)
-              modified=$(date -r "$img" +"%Y-%m-%dT%H:%M:%S%z")
-              
-              cat >> temp_images/list.json << EOF
-            {
-              "name": "$filename",
-              "extension": "$ext",
-              "size": "$size",
-              "modified": "$modified",
-              "url": "https://revista1919.github.io/images/$filename"
-            }
-          EOF
-            fi
-          done
-          
-          echo "]" >> temp_images/list.json
-
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./temp_images
-          publish_branch: gh-pages
-          force_orphan: true
-          user_name: 'github-actions[bot]'
-          user_email: 'github-actions[bot]@users.noreply.github.com'
-          commit_message: 'Deploy optimized images'
-
-      - name: Update main branch with optimized images
+      - name: Commit and push changes
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           
-          # Mover imágenes optimizadas a la raíz
-          mkdir -p optimized
-          cp temp_images/*.{webp,gif,svg} optimized/ 2>/dev/null || true
+          # Añadir todos los cambios (archivos eliminados y nuevos webp)
+          git add .
           
-          # Hacer commit de las imágenes optimizadas
-          if [ -n "$(ls -A optimized 2>/dev/null)" ]; then
-            cp optimized/* . 2>/dev/null || true
-            git add *.webp *.gif *.svg 2>/dev/null || true
-            git diff --staged --quiet || git commit -m "Add optimized images [skip ci]"
+          # Verificar si hay cambios para commit
+          if git diff --staged --quiet; then
+            echo "No hay cambios para commit"
+          else
+            git commit -m "Optimize images: convert JPG/PNG to WebP [skip ci]"
+            git push
+          fi
+          
+          # Mover los archivos de la galería a un directorio visible
+          mkdir -p gallery
+          cp gallery-dist/* gallery/ 2>/dev/null || true
+          git add gallery/
+          
+          if ! git diff --staged --quiet; then
+            git commit -m "Update gallery files [skip ci]"
             git push
           fi
