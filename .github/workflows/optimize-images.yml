@@ -1,4 +1,4 @@
-name: Optimize and Deploy Images
+name: Optimize and Deploy Images to Main
 
 on:
   push:
@@ -25,6 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -34,39 +35,44 @@ jobs:
       - name: Install sharp for image optimization
         run: npm install -g sharp-cli
 
+      - name: Create images directory
+        run: |
+          # Crear directorio para imágenes optimizadas en la raíz
+          mkdir -p images
+          
       - name: Optimize images
         run: |
-          # Crear directorio temporal
-          mkdir -p temp_images
-          
-          # Optimizar JPG/JPEG a WebP
-          find . -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) -not -path "./temp_images/*" -print0 2>/dev/null | while IFS= read -r -d '' file; do
+          # Optimizar JPG/JPEG a WebP directamente en images/
+          find . -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) -not -path "./images/*" -not -path "./node_modules/*" -print0 2>/dev/null | while IFS= read -r -d '' file; do
             filename=$(basename "$file")
             name="${filename%.*}"
             echo "🖼️ Optimizando JPG: $filename"
-            sharp -i "$file" -o "temp_images/$name.webp" --quality 80 --effort 6
+            sharp -i "$file" -o "images/$name.webp" --quality 80 --effort 6
           done
           
-          # Optimizar PNG a WebP
-          find . -type f -iname "*.png" -not -path "./temp_images/*" -print0 2>/dev/null | while IFS= read -r -d '' file; do
+          # Optimizar PNG a WebP directamente en images/
+          find . -type f -iname "*.png" -not -path "./images/*" -not -path "./node_modules/*" -print0 2>/dev/null | while IFS= read -r -d '' file; do
             filename=$(basename "$file")
             name="${filename%.*}"
             echo "🖼️ Optimizando PNG: $filename"
-            sharp -i "$file" -o "temp_images/$name.webp" --quality 85 --effort 6
+            sharp -i "$file" -o "images/$name.webp" --quality 85 --effort 6
           done
           
-          # Copiar GIFs sin optimizar (mantener animación)
-          find . -type f -iname "*.gif" -not -path "./temp_images/*" -exec cp {} temp_images/ \; 2>/dev/null || true
+          # Copiar GIFs manteniendo animación
+          find . -type f -iname "*.gif" -not -path "./images/*" -not -path "./node_modules/*" -exec cp {} images/ \; 2>/dev/null || true
           
           # Copiar WebP existentes
-          find . -type f -iname "*.webp" -not -path "./temp_images/*" -exec cp {} temp_images/ \; 2>/dev/null || true
+          find . -type f -iname "*.webp" -not -path "./images/*" -not -path "./node_modules/*" -exec cp {} images/ \; 2>/dev/null || true
           
           # Copiar SVGs
-          find . -type f -iname "*.svg" -not -path "./temp_images/*" -exec cp {} temp_images/ \; 2>/dev/null || true
+          find . -type f -iname "*.svg" -not -path "./images/*" -not -path "./node_modules/*" -exec cp {} images/ \; 2>/dev/null || true
+          
+          echo "✅ Imágenes optimizadas guardadas en /images"
 
-      - name: Generate image index
+      - name: Generate gallery HTML in root
         run: |
-          cat > temp_images/index.html << 'EOF'
+          # Crear index.html en la raíz
+          cat > index.html << 'EOF'
           <!DOCTYPE html>
           <html lang="es">
           <head>
@@ -74,6 +80,7 @@ jobs:
               <meta name="viewport" content="width=device-width, initial-scale=1.0">
               <title>Repositorio de Imágenes - Revista Nacional de Ciencias para Estudiantes</title>
               <style>
+                  /* Mismos estilos que tenías antes */
                   * {
                       margin: 0;
                       padding: 0;
@@ -404,7 +411,7 @@ jobs:
                   <div class="gallery" id="gallery"></div>
                   
                   <footer>
-                      <p>Las imágenes están disponibles en: <strong>https://revista1919.github.io/images/[nombre].webp</strong></p>
+                      <p>Las imágenes están disponibles en: <strong>https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/images/[nombre].webp</strong></p>
                       <p style="margin-top: 0.5rem; font-size: 0.9rem;">Actualizado: <span id="updateDate"></span></p>
                   </footer>
               </div>
@@ -420,10 +427,9 @@ jobs:
                   let images = [];
                   let currentView = 'grid';
                   
-                  // Cargar lista de imágenes
                   async function loadImages() {
                       try {
-                          const response = await fetch('./list.json?t=' + Date.now());
+                          const response = await fetch('./images/list.json?t=' + Date.now());
                           if (!response.ok) throw new Error('No se pudo cargar la lista');
                           images = await response.json();
                           
@@ -447,7 +453,6 @@ jobs:
                       }
                   }
                   
-                  // Renderizar galería
                   function renderGallery() {
                       const searchTerm = document.getElementById('searchInput').value.toLowerCase();
                       const filtered = images.filter(img => 
@@ -473,8 +478,8 @@ jobs:
                       
                       gallery.innerHTML = filtered.map(img => \`
                           <div class="image-card" data-name="\${img.name}">
-                              <img class="image-preview" src="./\${img.name}" alt="\${img.name}" 
-                                   onclick="openModal('./\${img.name}')"
+                              <img class="image-preview" src="./images/\${img.name}" alt="\${img.name}" 
+                                   onclick="openModal('./images/\${img.name}')"
                                    onerror="this.src='https://via.placeholder.com/300?text=Error'">
                               <span class="badge">\${img.extension}</span>
                               <div class="image-info">
@@ -484,7 +489,7 @@ jobs:
                                       <span>📅 \${new Date(img.modified).toLocaleDateString()}</span>
                                   </div>
                                   <div class="image-url" id="url-\${img.name}">
-                                      https://revista1919.github.io/images/\${img.name}
+                                      https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/images/\${img.name}
                                   </div>
                                   <button class="copy-btn" onclick="copyToClipboard('\${img.name}', this)">
                                       <span>📋 Copiar URL</span>
@@ -494,9 +499,8 @@ jobs:
                       \`).join('');
                   }
                   
-                  // Copiar al portapapeles
                   async function copyToClipboard(filename, btn) {
-                      const url = \`https://revista1919.github.io/images/\${filename}\`;
+                      const url = \`https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/images/\${filename}\`;
                       try {
                           await navigator.clipboard.writeText(url);
                           btn.classList.add('copied');
@@ -510,7 +514,6 @@ jobs:
                       }
                   }
                   
-                  // Cambiar vista
                   function setView(view) {
                       currentView = view;
                       document.querySelectorAll('.view-btn').forEach(btn => btn.classList.remove('active'));
@@ -518,7 +521,6 @@ jobs:
                       renderGallery();
                   }
                   
-                  // Modal de imagen
                   function openModal(src) {
                       document.getElementById('modalImage').src = src;
                       document.getElementById('imageModal').classList.add('active');
@@ -528,66 +530,74 @@ jobs:
                       document.getElementById('imageModal').classList.remove('active');
                   }
                   
-                  // Event listeners
                   document.getElementById('searchInput').addEventListener('input', renderGallery);
                   document.addEventListener('keydown', (e) => {
                       if (e.key === 'Escape') closeModal();
                   });
                   
-                  // Inicializar
                   loadImages();
               </script>
           </body>
           </html>
           EOF
+          
+          echo "✅ index.html generado en la raíz"
 
-      - name: Generate image list JSON
+      - name: Generate image list JSON in images folder
         run: |
-          echo "[" > temp_images/list.json
+          echo "[" > images/list.json
           
           # Generar lista de imágenes con metadatos
           first=true
-          for img in temp_images/*.{webp,gif,svg}; do
+          for img in images/*.{webp,gif,svg}; do
             if [ -f "$img" ]; then
               if [ "$first" = true ]; then
                 first=false
               else
-                echo "," >> temp_images/list.json
+                echo "," >> images/list.json
               fi
               filename=$(basename "$img")
               ext="${filename##*.}"
               size=$(du -h "$img" | cut -f1)
               modified=$(date -r "$img" +"%Y-%m-%dT%H:%M:%S%z" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
               
-              cat >> temp_images/list.json << EOF
+              cat >> images/list.json << EOF
             {
               "name": "$filename",
               "extension": "$ext",
               "size": "$size",
               "modified": "$modified",
-              "url": "https://revista1919.github.io/images/$filename"
+              "url": "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/images/$filename"
             }
           EOF
             fi
           done
           
-          echo "]" >> temp_images/list.json
-          
-          echo "✅ Archivo list.json generado"
+          echo "]" >> images/list.json
+          echo "✅ Archivo list.json generado en /images"
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./temp_images
-          publish_branch: gh-pages
-          force_orphan: true
-          user_name: 'github-actions[bot]'
-          user_email: 'github-actions[bot]@users.noreply.github.com'
-          commit_message: 'Deploy optimized images'
+      - name: Create .nojekyll file
+        run: touch .nojekyll
+
+      - name: Commit and push changes to main
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          # Añadir archivos
+          git add images/ index.html .nojekyll
+          
+          # Hacer commit si hay cambios
+          if git diff --staged --quiet; then
+            echo "No hay cambios para commitear"
+          else
+            git commit -m "Optimizar y desplegar imágenes [skip ci]"
+            git push origin main
+          fi
 
       - name: Verify deployment
         run: |
           echo "✅ Workflow completado exitosamente"
           echo "🌐 Tu galería estará disponible en: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
-          echo "⏳ Espera 2-3 minutos para que GitHub Pages publique el sitio"
+          echo "📁 Las imágenes están en: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/images/"
+          echo "⏳ Espera 2-3 minutos para que GitHub Pages publique los cambios"
