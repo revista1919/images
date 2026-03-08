@@ -10,8 +10,9 @@ on:
       - '**.gif'
       - '**.webp'
       - '**.svg'
-  workflow_dispatch:
+  workflow_dispatch: # Permite ejecución manual
 
+# Permisos para GitHub Pages
 permissions:
   contents: write
   pages: write
@@ -40,7 +41,7 @@ jobs:
           mkdir -p temp_images
           
           # Optimizar JPG/JPEG a WebP
-          find . -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) -not -path "./temp_images/*" -print0 2>/dev/null | while IFS= read -r -d '' file; do
+          find . -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) -print0 | while IFS= read -r -d '' file; do
             filename=$(basename "$file")
             name="${filename%.*}"
             echo "🖼️ Optimizando JPG: $filename"
@@ -48,7 +49,7 @@ jobs:
           done
           
           # Optimizar PNG a WebP
-          find . -type f -iname "*.png" -not -path "./temp_images/*" -print0 2>/dev/null | while IFS= read -r -d '' file; do
+          find . -type f -iname "*.png" -print0 | while IFS= read -r -d '' file; do
             filename=$(basename "$file")
             name="${filename%.*}"
             echo "🖼️ Optimizando PNG: $filename"
@@ -56,13 +57,13 @@ jobs:
           done
           
           # Copiar GIFs sin optimizar (mantener animación)
-          find . -type f -iname "*.gif" -not -path "./temp_images/*" -exec cp {} temp_images/ \; 2>/dev/null || true
+          find . -type f -iname "*.gif" -exec cp {} temp_images/ \;
           
           # Copiar WebP existentes
-          find . -type f -iname "*.webp" -not -path "./temp_images/*" -exec cp {} temp_images/ \; 2>/dev/null || true
+          find . -type f -iname "*.webp" -exec cp {} temp_images/ \;
           
           # Copiar SVGs
-          find . -type f -iname "*.svg" -not -path "./temp_images/*" -exec cp {} temp_images/ \; 2>/dev/null || true
+          find . -type f -iname "*.svg" -exec cp {} temp_images/ \;
 
       - name: Generate image index
         run: |
@@ -543,7 +544,9 @@ jobs:
 
       - name: Generate image list JSON
         run: |
-          echo "[" > temp_images/list.json
+          cat > temp_images/list.json << 'EOF'
+          [
+          EOF
           
           # Generar lista de imágenes con metadatos
           first=true
@@ -557,7 +560,7 @@ jobs:
               filename=$(basename "$img")
               ext="${filename##*.}"
               size=$(du -h "$img" | cut -f1)
-              modified=$(date -r "$img" +"%Y-%m-%dT%H:%M:%S%z" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
+              modified=$(date -r "$img" +"%Y-%m-%dT%H:%M:%S%z")
               
               cat >> temp_images/list.json << EOF
             {
@@ -572,8 +575,6 @@ jobs:
           done
           
           echo "]" >> temp_images/list.json
-          
-          echo "✅ Archivo list.json generado"
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
@@ -586,8 +587,19 @@ jobs:
           user_email: 'github-actions[bot]@users.noreply.github.com'
           commit_message: 'Deploy optimized images'
 
-      - name: Verify deployment
+      - name: Update main branch with optimized images
         run: |
-          echo "✅ Workflow completado exitosamente"
-          echo "🌐 Tu galería estará disponible en: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
-          echo "⏳ Espera 2-3 minutos para que GitHub Pages publique el sitio"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          # Mover imágenes optimizadas a la raíz
+          mkdir -p optimized
+          cp temp_images/*.{webp,gif,svg} optimized/ 2>/dev/null || true
+          
+          # Hacer commit de las imágenes optimizadas
+          if [ -n "$(ls -A optimized 2>/dev/null)" ]; then
+            cp optimized/* . 2>/dev/null || true
+            git add *.webp *.gif *.svg 2>/dev/null || true
+            git diff --staged --quiet || git commit -m "Add optimized images [skip ci]"
+            git push
+          fi
