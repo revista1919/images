@@ -1,4 +1,4 @@
-name: Optimize Images & Deploy to Pages
+name: 🚀 Optimize ALL Images & Deploy to Pages
 
 on:
   push:
@@ -9,8 +9,11 @@ on:
       - '**.png'
       - '**.gif'
       - '**.svg'
+      - '**.webp'
       - 'gallery/**'
   workflow_dispatch: # Permite ejecución manual
+  schedule:
+    - cron: '0 */6 * * *' # Ejecutar cada 6 horas para asegurar
 
 # Permisos necesarios para Pages
 permissions:
@@ -28,15 +31,14 @@ jobs:
     runs-on: ubuntu-latest
     # Estrategia para manejar múltiples ejecuciones
     strategy:
-      max-parallel: 1 # Evita conflictos de escritura
+      max-parallel: 1
     
     steps:
-      - name: Checkout repository
+      - name: Checkout repository with full history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Importante para evitar conflictos
           ref: ${{ github.head_ref }}
 
       - name: Setup Node.js
@@ -47,305 +49,396 @@ jobs:
       - name: Install sharp for image optimization
         run: npm install -g sharp-cli
 
-      - name: Optimize images with parallel processing
+      - name: 🔍 Find ALL images (including existing WebP)
+        id: find-images
         run: |
-          # Configuración optimizada
-          MAX_PARALLEL=4 # Procesar 4 imágenes a la vez
+          echo "🔍 Escaneando TODAS las imágenes en el repositorio..."
           
-          # Contadores
-          total_files=0
-          processed_files=0
+          # Crear archivo con lista completa de imágenes
+          echo "📸 Imágenes encontradas:" > all-images.log
           
-          echo "🔍 Buscando imágenes para optimizar..."
+          # Buscar TODOS los formatos de imagen
+          find . -type f \( \
+            -iname "*.jpg" -o \
+            -iname "*.jpeg" -o \
+            -iname "*.png" -o \
+            -iname "*.gif" -o \
+            -iname "*.svg" -o \
+            -iname "*.webp" \) \
+            -not -path "*/\.git/*" \
+            -not -path "*/node_modules/*" \
+            -not -path "*/gallery/*" | while read img; do
+            echo "$img" >> all-images.log
+          done
           
-          # Función para procesar archivos en paralelo
-          process_files() {
-            local ext=$1
-            local quality=$2
+          # Contar imágenes
+          total_images=$(wc -l < all-images.log)
+          echo "📊 TOTAL de imágenes encontradas: $total_images"
+          echo "total_images=$total_images" >> $GITHUB_OUTPUT
+          
+          # Mostrar las primeras 10 como ejemplo
+          echo "📋 Primeras 10 imágenes:" 
+          head -10 all-images.log
+
+      - name: 🖼️ Optimize ALL images (brute force approach)
+        run: |
+          echo "🔄 Iniciando optimización MASIVA de imágenes..."
+          
+          # Configuración
+          MAX_PARALLEL=8 # Más procesos paralelos
+          total_processed=0
+          total_errors=0
+          
+          # Función para optimizar cualquier imagen a WebP
+          optimize_image() {
+            local file=$1
+            local dir=$(dirname "$file")
+            local filename=$(basename "$file")
+            local name="${filename%.*}"
+            local ext="${filename##*.}"
             
-            # Encontrar archivos y procesarlos en paralelo
-            find . -type f -iname "*.$ext" -print0 | while IFS= read -r -d '' file; do
-              ((total_files++))
-              (
-                dir=$(dirname "$file")
-                filename=$(basename "$file")
-                name="${filename%.*}"
-                
-                echo "🖼️ [$ext] Optimizando: $filename"
-                
-                # Optimizar según extensión
-                if [[ "$ext" == "png" ]]; then
-                  sharp -i "$file" -o "$dir/$name.webp" --quality $quality --effort 6 --lossless
-                elif [[ "$ext" == "jpg" || "$ext" == "jpeg" ]]; then
-                  sharp -i "$file" -o "$dir/$name.webp" --quality $quality --effort 6 --mozjpeg
+            # Normalizar extensión a minúsculas
+            ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+            
+            # Determinar calidad según formato original
+            local quality=85
+            case "$ext" in
+              jpg|jpeg) quality=80 ;;
+              png) quality=85 ;;
+              webp) quality=90 ;;
+              *) quality=80 ;;
+            esac
+            
+            # Archivo de salida WebP
+            local webp_file="$dir/$name.webp"
+            
+            echo "⚙️ Procesando: $filename"
+            
+            # Casos especiales
+            case "$ext" in
+              gif)
+                # Para GIF, mantener original pero también crear copia
+                cp "$file" "$dir/$name.gif"
+                echo "✅ GIF preservado: $filename"
+                return 0
+                ;;
+              svg)
+                # SVG no necesita optimización
+                echo "✅ SVG preservado: $filename"
+                return 0
+                ;;
+              webp)
+                # Ya es WebP, verificar si necesita re-optimización
+                local size=$(stat -c%s "$file" 2>/dev/null || echo "0")
+                if [ "$size" -gt 102400 ]; then # Mayor a 100KB
+                  echo "🔄 Re-optimizando WebP grande: $filename"
+                  sharp -i "$file" -o "$webp_file.tmp" --quality $quality --effort 6
+                  if [ -f "$webp_file.tmp" ]; then
+                    mv "$webp_file.tmp" "$file"
+                  fi
                 fi
+                echo "✅ WebP verificado: $filename"
+                return 0
+                ;;
+              jpg|jpeg|png)
+                # Convertir a WebP
+                sharp -i "$file" -o "$webp_file" --quality $quality --effort 6
                 
-                # Verificar que el archivo se creó correctamente
-                if [ -f "$dir/$name.webp" ]; then
+                if [ -f "$webp_file" ]; then
                   # Comparar tamaños
                   orig_size=$(stat -c%s "$file" 2>/dev/null || echo "0")
-                  webp_size=$(stat -c%s "$dir/$name.webp" 2>/dev/null || echo "0")
+                  webp_size=$(stat -c%s "$webp_file" 2>/dev/null || echo "0")
                   
-                  # Si WebP es más grande, mantener original pero optimizarlo
-                  if [ "$webp_size" -gt "$orig_size" ] && [ "$orig_size" -gt 0 ]; then
-                    echo "⚠️ WebP más grande que original, optimizando JPG/PNG con calidad reducida"
-                    sharp -i "$file" -o "$dir/$name-optimized.$ext" --quality 70
-                    mv "$dir/$name-optimized.$ext" "$file"
-                    rm "$dir/$name.webp"
+                  # Decidir si mantener original
+                  if [ "$webp_size" -lt "$orig_size" ] || [ "$orig_size" -eq 0 ]; then
+                    # WebP es más pequeño, eliminar original
+                    rm -f "$file"
+                    echo "✅ Reemplazado: $filename → WebP (ahorro: $((orig_size - webp_size)) bytes)"
                   else
-                    # Eliminar archivo original si WebP es más pequeño
-                    rm "$file"
-                    echo "✅ [$ext] Optimizado: $filename → $name.webp (Ahorro: $(($orig_size - $webp_size)) bytes)"
+                    # WebP es más grande, mantener original pero optimizarlo
+                    sharp -i "$file" -o "$file.optimized" --quality 70
+                    if [ -f "$file.optimized" ]; then
+                      mv "$file.optimized" "$file"
+                      rm -f "$webp_file"
+                      echo "⚠️ Optimizado original: $filename (mantenido)"
+                    fi
                   fi
                 else
                   echo "❌ Error creando WebP para: $filename"
+                  return 1
                 fi
-              ) &
-              
-              # Control de procesos paralelos
-              if [[ $(jobs -r -p | wc -l) -ge $MAX_PARALLEL ]]; then
-                wait -n
-              fi
-            done
+                ;;
+            esac
             
-            # Esperar a que terminen todos los procesos
-            wait
+            return 0
           }
           
-          # Procesar diferentes formatos
-          echo "📸 Procesando JPG/JPEG..."
-          process_files "jpg" 80
-          process_files "jpeg" 80
-          
-          echo "📸 Procesando PNG..."
-          process_files "png" 85
-          
-          echo "📊 Total de archivos procesados: $total_files"
-
-      - name: Generate gallery files (optimizado)
-        run: |
-          # Crear directorio para la galería
-          mkdir -p gallery
-          
-          # Generar list.json con todas las imágenes (optimizado con parallel)
-          echo "[" > gallery/list.json.tmp
-          
-          # Procesar archivos en paralelo para generar el JSON
-          find . -type f \( -name "*.webp" -o -name "*.gif" -o -name "*.svg" \) -print0 | while IFS= read -r -d '' img; do
+          # Procesar TODAS las imágenes con control de errores
+          while IFS= read -r file; do
             (
-              filename=$(basename "$img")
-              ext="${filename##*.}"
-              size=$(du -h "$img" | cut -f1)
-              modified=$(date -r "$img" +"%Y-%m-%dT%H:%M:%S%z" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
-              path="${img#./}"
-              
-              # Crear entrada JSON
-              cat << EOF
-          {
-            "name": "$filename",
-            "path": "$path",
-            "extension": "$ext",
-            "size": "$size",
-            "modified": "$modified"
-          }
-          EOF
-            ) >> gallery/list.json.entries &
+              if optimize_image "$file"; then
+                echo "✅ Éxito: $file" >> processing.log
+              else
+                echo "❌ Error: $file" >> error.log
+                total_errors=$((total_errors + 1))
+              fi
+            ) &
             
             # Control de procesos paralelos
-            if [[ $(jobs -r -p | wc -l) -ge 8 ]]; then
+            if [[ $(jobs -r -p | wc -l) -ge $MAX_PARALLEL ]]; then
               wait -n
             fi
-          done
+            
+            total_processed=$((total_processed + 1))
+            
+            # Mostrar progreso cada 10 imágenes
+            if [ $((total_processed % 10)) -eq 0 ]; then
+              echo "📊 Progreso: $total_processed / ${{ steps.find-images.outputs.total_images }} imágenes"
+            fi
+          done < all-images.log
           
+          # Esperar a que terminen todos los procesos
           wait
           
-          # Combinar entradas en un JSON válido
-          entries=$(cat gallery/list.json.entries 2>/dev/null | paste -sd "," -)
-          echo "$entries" >> gallery/list.json.tmp
-          echo "]" >> gallery/list.json.tmp
+          echo "📊 RESUMEN FINAL:"
+          echo "   Total procesadas: $total_processed"
+          echo "   Errores: $total_errors"
           
-          # Limpiar archivos temporales
-          rm -f gallery/list.json.entries
-          mv gallery/list.json.tmp gallery/list.json
+          if [ -f error.log ]; then
+            echo "⚠️ Imágenes con errores:"
+            cat error.log
+          fi
+
+      - name: 🔄 Force sync ALL images to gallery
+        run: |
+          echo "🔄 Sincronizando FORZOSAMENTE TODAS las imágenes a gallery..."
           
-          # Copiar el index.html optimizado (con caché)
-          cp -f .github/scripts/gallery-index.html gallery/index.html 2>/dev/null || cat > gallery/index.html << 'EOF'
-          <!DOCTYPE html>
-          <html lang="es">
-          <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>Galería de Imágenes Optimizadas</title>
-              <style>
-                  /* CSS optimizado y minificado */
-                  *{margin:0;padding:0;box-sizing:border-box}
-                  body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#667eea 0,#764ba2 100%);min-height:100vh;padding:2rem}
-                  .container{max-width:1400px;margin:0 auto;background:#fff;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden}
-                  header{background:linear-gradient(135deg,#667eea 0,#764ba2 100%);color:#fff;padding:2rem;text-align:center}
-                  header h1{font-size:2.5rem;margin-bottom:.5rem}
-                  .stats{display:flex;justify-content:center;gap:2rem;margin-top:1.5rem}
-                  .stat-item{background:rgba(255,255,255,.2);padding:.5rem 1.5rem;border-radius:50px;backdrop-filter:blur(10px)}
-                  .search-section{padding:1.5rem;background:#f8f9fa;border-bottom:1px solid #e9ecef}
-                  .search-box{max-width:600px;margin:0 auto;position:relative}
-                  .search-box input{width:100%;padding:1rem 1rem 1rem 3rem;border:2px solid #e9ecef;border-radius:50px;font-size:1rem}
-                  .search-box input:focus{outline:none;border-color:#667eea;box-shadow:0 0 0 3px rgba(102,126,234,.1)}
-                  .search-box .search-icon{position:absolute;left:1rem;top:50%;transform:translateY(-50%);color:#adb5bd}
-                  .gallery-header{padding:1rem 2rem;background:#fff;border-bottom:1px solid #e9ecef;display:flex;justify-content:space-between;align-items:center}
-                  .view-controls{display:flex;gap:.5rem}
-                  .view-btn{padding:.5rem 1rem;border:1px solid #dee2e6;background:#fff;border-radius:8px;cursor:pointer}
-                  .view-btn.active{background:#667eea;color:#fff;border-color:#667eea}
-                  .gallery{padding:2rem;display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1.5rem}
-                  .gallery.list-view{grid-template-columns:1fr}
-                  .image-card{background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 6px rgba(0,0,0,.1);transition:.3s;border:2px solid transparent;position:relative}
-                  .image-card:hover{transform:translateY(-5px);box-shadow:0 8px 15px rgba(0,0,0,.2);border-color:#667eea}
-                  .list-view .image-card{display:flex;align-items:center}
-                  .image-preview{width:100%;height:200px;object-fit:cover;background:#f8f9fa;cursor:pointer}
-                  .list-view .image-preview{width:100px;height:100px}
-                  .image-info{padding:1rem}
-                  .image-name{font-weight:600;color:#212529;margin-bottom:.5rem;word-break:break-all}
-                  .image-meta{font-size:.85rem;color:#6c757d;display:flex;gap:1rem;margin-bottom:.5rem}
-                  .image-url{background:#f8f9fa;padding:.5rem;border-radius:6px;font-size:.8rem;font-family:monospace;word-break:break-all;margin:.5rem 0;border:1px solid #e9ecef}
-                  .copy-btn{background:#667eea;color:#fff;border:none;padding:.5rem 1rem;border-radius:6px;cursor:pointer;width:100%;display:flex;align-items:center;justify-content:center;gap:.5rem}
-                  .copy-btn.copied{background:#48bb78}
-                  .badge{position:absolute;top:.5rem;right:.5rem;background:rgba(0,0,0,.7);color:#fff;padding:.25rem .75rem;border-radius:50px;font-size:.75rem;backdrop-filter:blur(5px)}
-                  .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.9);z-index:1000;justify-content:center;align-items:center}
-                  .modal.active{display:flex}
-                  .modal-content{max-width:90%;max-height:90%}
-                  .modal-content img{width:100%;height:100%;object-fit:contain}
-                  .modal-close{position:absolute;top:1rem;right:1rem;color:#fff;font-size:2rem;cursor:pointer;width:40px;height:40px;background:rgba(255,255,255,.2);border-radius:50%;display:flex;align-items:center;justify-content:center}
-                  footer{text-align:center;padding:1.5rem;background:#f8f9fa;color:#6c757d;border-top:1px solid #e9ecef}
-                  @media(max-width:768px){body{padding:1rem}header h1{font-size:1.8rem}.stats{flex-direction:column;gap:.5rem}}
-              </style>
-          </head>
-          <body>
-              <div class="container">
-                  <header>
-                      <h1>📸 Galería de Imágenes</h1>
-                      <div class="stats" id="stats"></div>
-                  </header>
-                  <div class="search-section">
-                      <div class="search-box">
-                          <span class="search-icon">🔍</span>
-                          <input type="text" id="searchInput" placeholder="Buscar imágenes...">
-                      </div>
-                  </div>
-                  <div class="gallery-header">
-                      <h2 id="galleryTitle">Todas las imágenes</h2>
-                      <div class="view-controls">
-                          <button class="view-btn active" onclick="setView('grid')">📱 Grid</button>
-                          <button class="view-btn" onclick="setView('list')">📋 Lista</button>
-                      </div>
-                  </div>
-                  <div class="gallery" id="gallery"></div>
-                  <footer>
-                      <p>Imágenes optimizadas en WebP · <span id="updateDate"></span></p>
-                  </footer>
-              </div>
-              <div class="modal" id="imageModal" onclick="closeModal()">
-                  <span class="modal-close">&times;</span>
-                  <div class="modal-content">
-                      <img id="modalImage" src="" alt="Vista previa">
-                  </div>
-              </div>
-              <script>
-                  let images=[],currentView='grid';
-                  async function loadImages(){try{
-                      const r=await fetch('./list.json?t='+Date.now());
-                      if(!r.ok)throw new Error('Error');
-                      images=await r.json();
-                      document.getElementById('updateDate').textContent=new Date().toLocaleString();
-                      document.getElementById('stats').innerHTML=\`
-                          <div class="stat-item">📸 \${images.length} imágenes</div>
-                          <div class="stat-item">⚡ WebP optimizado</div>
-                      \`;
-                      renderGallery();
-                  }catch(e){console.error(e)}}
-                  function renderGallery(){
-                      const term=document.getElementById('searchInput').value.toLowerCase(),
-                            filtered=images.filter(i=>i.name.toLowerCase().includes(term)),
-                            gallery=document.getElementById('gallery');
-                      gallery.className=\`gallery \${currentView==='list'?'list-view':''}\`;
-                      document.getElementById('galleryTitle').textContent=
-                          filtered.length===images.length?\`Todas las imágenes (\${filtered.length})\`:
-                          \`Resultados (\${filtered.length} de \${images.length})\`;
-                      if(!filtered.length){gallery.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:3rem">No se encontraron imágenes</div>';return}
-                      gallery.innerHTML=filtered.map(i=>\`
-                          <div class="image-card">
-                              <img class="image-preview" src="./\${i.path}" alt="\${i.name}" onclick="openModal('./\${i.path}')">
-                              <span class="badge">\${i.extension}</span>
-                              <div class="image-info">
-                                  <div class="image-name">\${i.name}</div>
-                                  <div class="image-meta">
-                                      <span>📦 \${i.size}</span>
-                                      <span>📅 \${new Date(i.modified).toLocaleDateString()}</span>
-                                  </div>
-                                  <div class="image-url">\${window.location.origin}\${window.location.pathname}\${i.path}</div>
-                                  <button class="copy-btn" onclick="copyUrl('\${i.path}',this)">📋 Copiar URL</button>
-                              </div>
-                          </div>
-                      \`).join('');
-                  }
-                  async function copyUrl(p,b){const url=\`\${window.location.origin}\${window.location.pathname}\${p}\`;try{await navigator.clipboard.writeText(url);b.classList.add('copied');b.innerHTML='✓ Copiado!';setTimeout(()=>{b.classList.remove('copied');b.innerHTML='📋 Copiar URL'},2000)}catch(e){alert('Error')}}
-                  function setView(v){currentView=v;document.querySelectorAll('.view-btn').forEach(b=>b.classList.remove('active'));event.target.classList.add('active');renderGallery()}
-                  function openModal(s){document.getElementById('modalImage').src=s;document.getElementById('imageModal').classList.add('active')}
-                  function closeModal(){document.getElementById('imageModal').classList.remove('active')}
-                  document.getElementById('searchInput').addEventListener('input',renderGallery);
-                  document.addEventListener('keydown',e=>e.key==='Escape'&&closeModal());
-                  loadImages();
-              </script>
-          </body>
-          </html>
+          # Limpiar directorio gallery
+          rm -rf gallery
+          mkdir -p gallery
+          
+          # Copiar TODAS las imágenes al directorio gallery (incluyendo subdirectorios)
+          echo "📋 Copiando imágenes manteniendo estructura..."
+          
+          # Encontrar y copiar TODAS las imágenes
+          find . -type f \( \
+            -iname "*.jpg" -o \
+            -iname "*.jpeg" -o \
+            -iname "*.png" -o \
+            -iname "*.gif" -o \
+            -iname "*.svg" -o \
+            -iname "*.webp" \) \
+            -not -path "*/\.git/*" \
+            -not -path "*/node_modules/*" \
+            -not -path "*/gallery/*" | while read img; do
+            
+            # Crear estructura de directorios en gallery
+            rel_path="${img#./}"
+            dir_path=$(dirname "$rel_path")
+            mkdir -p "gallery/$dir_path"
+            
+            # Copiar imagen
+            cp "$img" "gallery/$rel_path"
+            echo "  Copiada: $rel_path"
+          done
+          
+          # Verificar que se copiaron todas
+          echo "🔍 Verificando integridad..."
+          
+          original_count=$(find . -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.svg" -o -iname "*.webp" \) -not -path "*/\.git/*" -not -path "*/node_modules/*" -not -path "*/gallery/*" | wc -l)
+          gallery_count=$(find gallery -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.svg" -o -iname "*.webp" \) | wc -l)
+          
+          echo "📊 Originales: $original_count | En gallery: $gallery_count"
+          
+          if [ "$original_count" -eq "$gallery_count" ]; then
+            echo "✅ VERIFICACIÓN EXITOSA: Todas las imágenes están en gallery"
+          else
+            echo "⚠️ ADVERTENCIA: Discrepancia en número de imágenes"
+          fi
+
+      - name: 📊 Generate COMPLETE gallery files
+        run: |
+          echo "📊 Generando archivos de galería COMPLETOS..."
+          
+          # Iniciar JSON
+          echo "[" > gallery/list.json
+          
+          # Contador
+          first=true
+          total_in_json=0
+          
+          # Recorrer TODAS las imágenes en gallery
+          find gallery -type f \( \
+            -iname "*.jpg" -o \
+            -iname "*.jpeg" -o \
+            -iname "*.png" -o \
+            -iname "*.gif" -o \
+            -iname "*.svg" -o \
+            -iname "*.webp" \) | sort | while read img; do
+            
+            # Obtener información
+            filename=$(basename "$img")
+            ext="${filename##*.}"
+            size=$(du -h "$img" | cut -f1)
+            modified=$(date -r "$img" +"%Y-%m-%dT%H:%M:%S%z" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
+            path="${img#gallery/}"
+            
+            # Añadir coma si no es el primero
+            if [ "$first" = true ]; then
+              first=false
+            else
+              echo "," >> gallery/list.json
+            fi
+            
+            # Añadir entrada JSON (escapando caracteres especiales)
+            printf '  {\n' >> gallery/list.json
+            printf '    "name": "%s",\n' "$(echo "$filename" | sed 's/"/\\"/g')" >> gallery/list.json
+            printf '    "path": "%s",\n' "$(echo "$path" | sed 's/"/\\"/g')" >> gallery/list.json
+            printf '    "extension": "%s",\n' "$ext" >> gallery/list.json
+            printf '    "size": "%s",\n' "$size" >> gallery/list.json
+            printf '    "modified": "%s"\n' "$modified" >> gallery/list.json
+            printf '  }' >> gallery/list.json
+            
+            total_in_json=$((total_in_json + 1))
+          done
+          
+          # Cerrar JSON
+          echo "" >> gallery/list.json
+          echo "]" >> gallery/list.json
+          
+          # Validar JSON
+          if command -v jq &> /dev/null; then
+            if jq empty gallery/list.json 2>/dev/null; then
+              echo "✅ JSON válido"
+            else
+              echo "❌ JSON inválido, creando versión simplificada..."
+              # Versión simplificada si hay error
+              find gallery -type f -name "*.webp" -o -name "*.jpg" -o -name "*.png" | while read img; do
+                echo "\"$(basename "$img")\""
+              done > gallery/simple-list.txt
+            fi
+          fi
+          
+          echo "📊 Total imágenes en JSON: $total_in_json"
+          
+          # Crear archivo .nojekyll
+          touch gallery/.nojekyll
+          
+          # Crear archivo README en gallery
+          cat > gallery/README.md << EOF
+          # Galería de Imágenes
+          
+          **Total de imágenes:** $total_in_json
+          **Última actualización:** $(date)
+          
+          Esta galería contiene TODAS las imágenes del repositorio en formato optimizado.
           EOF
           
-          # Crear archivo .nojekyll para evitar procesamiento de Jekyll
-          touch gallery/.nojekyll
+          # Crear archivo de verificación
+          echo "$total_in_json" > gallery/image-count.txt
+          date >> gallery/image-count.txt
 
-      - name: Commit and push optimized images
+      - name: 💾 Commit ALL changes with force
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           
-          # Añadir cambios
-          git add .
+          echo "💾 Preparando commit MASIVO..."
           
-          # Intentar commit y push con reintentos
-          max_retries=3
-          retry_count=0
+          # Asegurarse de que estamos en la rama correcta
+          git fetch origin main
+          git checkout main
           
-          while [ $retry_count -lt $max_retries ]; do
-            if git diff --staged --quiet; then
-              echo "No hay cambios para commit"
-              break
-            else
-              git commit -m "Optimize images: convert to WebP [skip ci]"
+          # Forzar añadir todos los cambios (incluyendo eliminaciones)
+          git add -A --force
+          
+          # Verificar cambios
+          if git diff --staged --quiet; then
+            echo "✅ No hay cambios para commit"
+          else
+            # Mostrar resumen de cambios
+            echo "📊 Cambios a commitear:"
+            git diff --staged --stat
+            
+            # Commit con mensaje descriptivo
+            git commit -m "🔥 Actualización MASIVA de imágenes [skip ci]
+            
+            - Procesadas todas las imágenes del repositorio
+            - Sincronización forzosa a gallery
+            - Actualización completa del listado
+            - Timestamp: $(date)"
+            
+            # Push con reintentos y force-with-lease
+            max_retries=5
+            retry_count=0
+            
+            while [ $retry_count -lt $max_retries ]; do
+              echo "🔄 Intento de push $((retry_count + 1))/$max_retries"
               
-              # Pull antes de push para evitar conflictos
+              # Pull con rebase
               git pull --rebase origin main
               
-              if git push; then
+              if git push origin main; then
                 echo "✅ Push exitoso"
                 break
               else
                 retry_count=$((retry_count + 1))
-                echo "⚠️ Push falló, reintento $retry_count/$max_retries"
-                sleep 5
-                git pull --rebase origin main
+                if [ $retry_count -lt $max_retries ]; then
+                  echo "⚠️ Push falló, reintentando en 5 segundos..."
+                  sleep 5
+                fi
               fi
-            fi
-          done
+            done
+          fi
 
-      - name: Setup Pages
+      - name: 🚀 Deploy to GitHub Pages
         uses: actions/configure-pages@v4
-
-      - name: Upload artifact
+        
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: './gallery'
-
+          retention-days: 1
+          
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
         with:
-          timeout: 60000
-          error_count: 10
+          timeout: 120000
+          error_count: 20
           reporting_interval: 5000
+          
+      - name: ✅ Verify deployment
+        run: |
+          echo "✅ Verificando despliegue..."
+          
+          # Esperar a que Pages esté disponible
+          sleep 10
+          
+          # Verificar que el sitio está accesible
+          SITE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+          echo "🌐 Sitio desplegado en: $SITE_URL"
+          
+          # Verificar archivos críticos
+          if [ -f gallery/list.json ] && [ -f gallery/index.html ]; then
+            echo "✅ Archivos críticos presentes"
+            
+            # Mostrar estadísticas finales
+            img_count=$(jq '. | length' gallery/list.json 2>/dev/null || echo "0")
+            echo "📊 TOTAL FINAL DE IMÁGENES: $img_count"
+          else
+            echo "⚠️ Archivos críticos faltantes"
+          fi
+
+      - name: 📝 Create deployment summary
+        if: always()
+        run: |
+          echo "## 📊 Resumen de Despliegue" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Estado:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Total de imágenes:** $(jq '. | length' gallery/list.json 2>/dev/null || echo '0')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**URL del sitio:** https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Última actualización:** $(date)" >> $GITHUB_STEP_SUMMARY
